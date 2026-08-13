@@ -2,7 +2,7 @@ use jcode_message_types::{
     ContentBlock, Message, Role, TOOL_OUTPUT_MISSING_TEXT, sanitize_tool_id,
 };
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Normalize a tool `parameters` JSON schema for whichever upstream OpenRouter
 /// routes the model to.
@@ -479,7 +479,13 @@ pub fn build_chat_messages(
     }
 
     // Final pass: ensure tool outputs immediately follow assistant tool calls.
-    let mut tool_output_map: HashMap<String, Value> = HashMap::new();
+    // Tool call ids are only unique per model response (some models restart
+    // numbering every turn, and sanitization collapses separators, so `bash:0`
+    // and `bash_0` both become `bash_0`). Queue outputs FIFO per id so each
+    // call consumes the oldest unconsumed output; a first-wins map replays the
+    // first output for every repeated id and poisons the model's context.
+    let mut tool_output_queues: HashMap<String, VecDeque<Value>> = HashMap::new();
+    let mut placeholder_outputs: HashMap<String, Value> = HashMap::new();
     for msg in &api_messages {
         if msg.get("role").and_then(|v| v.as_str()) == Some("tool")
             && let Some(id) = msg.get("tool_call_id").and_then(|v| v.as_str())
@@ -489,20 +495,15 @@ pub fn build_chat_messages(
                 .and_then(|v| v.as_str())
                 .map(|v| v == missing_output)
                 .unwrap_or(false);
-            match tool_output_map.get(id) {
-                Some(existing) => {
-                    let existing_missing = existing
-                        .get("content")
-                        .and_then(|v| v.as_str())
-                        .map(|v| v == missing_output)
-                        .unwrap_or(false);
-                    if existing_missing && !is_missing {
-                        tool_output_map.insert(id.to_string(), msg.clone());
-                    }
-                }
-                None => {
-                    tool_output_map.insert(id.to_string(), msg.clone());
-                }
+            if is_missing {
+                placeholder_outputs
+                    .entry(id.to_string())
+                    .or_insert_with(|| msg.clone());
+            } else {
+                tool_output_queues
+                    .entry(id.to_string())
+                    .or_default()
+                    .push_back(msg.clone());
             }
         }
     }
@@ -524,9 +525,12 @@ pub fn build_chat_messages(
                 reordered.push(msg);
                 for call in tool_calls {
                     if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
-                        if let Some(tool_msg) = tool_output_map.get(id) {
-                            reordered.push(tool_msg.clone());
-                            used_outputs.insert(id.to_string());
+                        let tool_msg = tool_output_queues
+                            .get_mut(id)
+                            .and_then(|queue| queue.pop_front())
+                            .or_else(|| placeholder_outputs.get(id).cloned());
+                        if let Some(tool_msg) = tool_msg {
+                            reordered.push(tool_msg);
                         } else {
                             injected_ordered += 1;
                             reordered.push(serde_json::json!({
@@ -534,8 +538,8 @@ pub fn build_chat_messages(
                                 "tool_call_id": id,
                                 "content": missing_output.clone()
                             }));
-                            used_outputs.insert(id.to_string());
                         }
+                        used_outputs.insert(id.to_string());
                     }
                 }
                 continue;
@@ -577,8 +581,8 @@ pub fn build_chat_messages(
 #[cfg(test)]
 mod request_tests {
     use super::build_chat_messages;
-    use jcode_message_types::Message;
-    use serde_json::json;
+    use jcode_message_types::{ContentBlock, Message, Role};
+    use serde_json::{Value, json};
 
     #[test]
     fn orphaned_tool_output_is_recovered_as_a_user_message() {
@@ -593,6 +597,43 @@ mod request_tests {
                 "content": "[Recovered orphaned tool output: call_orphan]\norphan result"
             })]
         );
+    }
+
+    #[test]
+    fn repeated_tool_call_ids_get_their_own_outputs_in_order() {
+        // Some models restart tool-call numbering every response, and id
+        // sanitization collapses `:` to `_`, so ids repeat across turns. Each
+        // call must pair with its own output, not replay the first output.
+        let tool_use = |id: &str| Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: id.to_string(),
+                name: "bash".to_string(),
+                input: json!({"command": "true"}),
+                thought_signature: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        };
+        let messages = vec![
+            Message::user("hi"),
+            tool_use("bash_0"),
+            Message::tool_result("bash_0", "first output", false),
+            tool_use("bash:0"),
+            Message::tool_result("bash:0", "second output", false),
+        ];
+
+        let api_messages = build_chat_messages(&messages, "", false, false, false);
+
+        let tool_messages: Vec<&Value> = api_messages
+            .iter()
+            .filter(|m| m.get("role").and_then(|v| v.as_str()) == Some("tool"))
+            .collect();
+        assert_eq!(tool_messages.len(), 2);
+        assert_eq!(tool_messages[0]["tool_call_id"], "bash_0");
+        assert_eq!(tool_messages[0]["content"], "first output");
+        assert_eq!(tool_messages[1]["tool_call_id"], "bash_0");
+        assert_eq!(tool_messages[1]["content"], "second output");
     }
 }
 
