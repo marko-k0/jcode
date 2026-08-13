@@ -886,6 +886,11 @@ pub struct OpenRouterProvider {
     /// Resolved once at construction from named-profile config or the
     /// `JCODE_OPENAI_EXTRA_BODY` env/env-file value.
     extra_body: Option<serde_json::Map<String, Value>>,
+    /// Extra headers attached to every chat/completions request, resolved
+    /// once at construction from named-profile `extra_headers` config.
+    /// Values may be empty (present-but-empty opt-out headers, e.g.
+    /// Bifrost's `x-bf-mcp-include-tools` deny-all).
+    extra_headers: Vec<(String, String)>,
     static_models: Vec<String>,
     static_context_limits: HashMap<String, usize>,
     /// Explicit per-model image-input capability from named-provider `models[].input`.
@@ -1103,6 +1108,28 @@ impl OpenRouterProvider {
         }
 
         None
+    }
+
+    /// Resolve extra request headers from the named-profile `extra_headers`
+    /// table. Invalid header names are logged and skipped rather than failing
+    /// provider construction; empty values are kept (they are meaningful to
+    /// some gateways).
+    fn resolve_extra_headers(
+        config: Option<&std::collections::BTreeMap<String, String>>,
+    ) -> Vec<(String, String)> {
+        let mut headers = Vec::new();
+        if let Some(table) = config {
+            for (name, value) in table {
+                if reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_ok() {
+                    headers.push((name.clone(), value.clone()));
+                } else {
+                    jcode_base::logging::warn(&format!(
+                        "Ignoring provider `extra_headers` entry with invalid header name: {name:?}"
+                    ));
+                }
+            }
+        }
+        headers
     }
 
     /// Resolve extra request-body fields for an OpenAI-compatible/OpenRouter
@@ -1370,6 +1397,7 @@ impl OpenRouterProvider {
                     .filter(|name| is_safe_env_file_name(name))
                     .unwrap_or(DEFAULT_ENV_FILE),
             ),
+            extra_headers: Self::resolve_extra_headers(profile.extra_headers.as_ref()),
             static_models,
             static_context_limits,
             static_image_input_support,
@@ -1564,6 +1592,7 @@ impl OpenRouterProvider {
             reasoning_effort_support: None,
             max_tokens,
             extra_body,
+            extra_headers: Vec::new(),
             static_models,
             static_context_limits,
             static_image_input_support: HashMap::new(),
@@ -1605,6 +1634,7 @@ impl OpenRouterProvider {
             reasoning_effort_support: None,
             max_tokens: Self::configured_max_tokens(None),
             extra_body: Self::resolve_extra_body(None, DEFAULT_ENV_FILE),
+            extra_headers: Self::resolve_extra_headers(None),
             static_models: Vec::new(),
             static_context_limits: HashMap::new(),
             static_image_input_support: HashMap::new(),
@@ -1674,6 +1704,7 @@ impl OpenRouterProvider {
             reasoning_effort_support: None,
             max_tokens: Self::configured_max_tokens(Some(&resolved.id)),
             extra_body: Self::resolve_extra_body(None, &resolved.env_file),
+            extra_headers: Vec::new(),
             static_models,
             static_context_limits,
             static_image_input_support: HashMap::new(),
@@ -1877,6 +1908,7 @@ impl OpenRouterProvider {
                 reasoning_effort_support: None,
                 max_tokens: None,
                 extra_body: None,
+                extra_headers: Vec::new(),
                 static_models: Vec::new(),
                 static_context_limits: HashMap::new(),
                 static_image_input_support: HashMap::new(),

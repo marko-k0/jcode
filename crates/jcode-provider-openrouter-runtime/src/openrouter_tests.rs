@@ -1281,6 +1281,7 @@ fn make_provider() -> OpenRouterProvider {
         reasoning_effort_support: None,
         max_tokens: None,
         extra_body: None,
+        extra_headers: Vec::new(),
         static_models: Vec::new(),
         static_context_limits: HashMap::new(),
         static_image_input_support: HashMap::new(),
@@ -1292,6 +1293,90 @@ fn make_provider() -> OpenRouterProvider {
         provider_pin: Arc::new(Mutex::new(None)),
         endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
     }
+}
+
+#[test]
+fn resolve_extra_headers_keeps_valid_names_and_empty_values() {
+    let mut table = std::collections::BTreeMap::new();
+    table.insert("x-bf-mcp-include-tools".to_string(), String::new());
+    table.insert("x-custom".to_string(), "yes".to_string());
+    let headers = OpenRouterProvider::resolve_extra_headers(Some(&table));
+    assert_eq!(
+        headers,
+        vec![
+            ("x-bf-mcp-include-tools".to_string(), String::new()),
+            ("x-custom".to_string(), "yes".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn resolve_extra_headers_skips_invalid_names() {
+    let mut table = std::collections::BTreeMap::new();
+    table.insert("bad header".to_string(), "x".to_string());
+    table.insert("good-header".to_string(), "y".to_string());
+    let headers = OpenRouterProvider::resolve_extra_headers(Some(&table));
+    assert_eq!(headers, vec![("good-header".to_string(), "y".to_string())]);
+}
+
+#[test]
+fn extra_headers_are_sent_on_chat_requests() {
+    let (api_base, request_rx) = spawn_single_response_chat_server();
+    let provider = OpenRouterProvider {
+        api_base,
+        supports_model_catalog: false,
+        extra_headers: vec![
+            ("x-bf-mcp-include-tools".to_string(), String::new()),
+            ("x-jcode-test".to_string(), "present".to_string()),
+        ],
+        ..make_custom_compatible_provider()
+    };
+
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "hi".to_string(),
+            cache_control: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut stream = provider
+            .complete(&messages, &[], "", None)
+            .await
+            .expect("fake chat request should start");
+        while let Some(event) = stream.next().await {
+            if event.is_err() {
+                break;
+            }
+        }
+    });
+
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("capture fake provider request");
+    let header_line = |name: &str| {
+        request
+            .lines()
+            .find(|line| line.to_ascii_lowercase().starts_with(name))
+            .map(|line| line.trim_end().to_string())
+    };
+    // Empty value must survive: gateways read a present-but-empty header as
+    // an explicit opt-out (Bifrost MCP tool injection deny-all).
+    assert_eq!(
+        header_line("x-bf-mcp-include-tools:"),
+        Some("x-bf-mcp-include-tools:".to_string())
+    );
+    assert_eq!(
+        header_line("x-jcode-test:"),
+        Some("x-jcode-test: present".to_string())
+    );
 }
 
 fn make_custom_compatible_provider() -> OpenRouterProvider {
@@ -1310,6 +1395,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         reasoning_effort_support: None,
         max_tokens: None,
         extra_body: None,
+        extra_headers: Vec::new(),
         static_models: Vec::new(),
         static_context_limits: HashMap::new(),
         static_image_input_support: HashMap::new(),
@@ -2850,6 +2936,7 @@ fn midstream_transport_fault_emits_retry_rollback_before_replay() {
                 label: "test".to_string(),
             },
             false,
+            Vec::new(),
             request,
             tx,
             Arc::new(Mutex::new(None)),

@@ -32,6 +32,7 @@ pub(super) async fn run_stream_with_retries(
     api_base: String,
     auth: ProviderAuth,
     send_openrouter_headers: bool,
+    extra_headers: Vec<(String, String)>,
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
@@ -92,6 +93,7 @@ pub(super) async fn run_stream_with_retries(
             api_base.clone(),
             auth.clone(),
             send_openrouter_headers,
+            &extra_headers,
             request.clone(),
             attempt_tx,
             Arc::clone(&provider_pin),
@@ -160,6 +162,7 @@ async fn stream_response(
     api_base: String,
     auth: ProviderAuth,
     send_openrouter_headers: bool,
+    extra_headers: &[(String, String)],
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
@@ -191,6 +194,13 @@ async fn stream_response(
         req = req
             .header("HTTP-Referer", "https://github.com/jcode")
             .header("X-Title", "jcode");
+    }
+
+    // Profile-configured extra headers go last so they are visible overrides
+    // (e.g. a present-but-empty `x-bf-mcp-include-tools` opts out of gateway
+    // MCP tool injection). Values were validated at construction.
+    for (name, value) in extra_headers {
+        req = req.header(name.as_str(), value.as_str());
     }
 
     let response = jcode_provider_core::transport::send_with_initial_response_timeout(

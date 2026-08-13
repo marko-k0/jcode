@@ -463,6 +463,18 @@ pub struct NamedProviderConfig {
     /// Must be a JSON object; keys here override jcode-generated body fields.
     #[serde(default, alias = "extra-body", skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<serde_json::Value>,
+    /// Extra HTTP headers attached to every chat/completions request to this
+    /// provider. Values may be empty: some gateways treat a present-but-empty
+    /// header as an explicit opt-out (e.g. Bifrost's `x-bf-mcp-include-tools`
+    /// deny-all, which suppresses gateway-side MCP tool injection so the
+    /// client-side MCP registry stays the single source of tools). Auth
+    /// headers do not belong here.
+    #[serde(
+        default,
+        alias = "extra-headers",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub extra_headers: Option<std::collections::BTreeMap<String, String>>,
     /// Whether this endpoint accepts the DeepSeek-style top-level
     /// `reasoning_effort` request field (`/effort` support). When unset, jcode
     /// auto-detects it from the active model id (DeepSeek-family models
@@ -495,6 +507,7 @@ impl Default for NamedProviderConfig {
             allow_provider_pinning: false,
             models: Vec::new(),
             extra_body: None,
+            extra_headers: None,
             supports_reasoning_effort: None,
         }
     }

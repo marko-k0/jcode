@@ -300,6 +300,7 @@ impl Provider for OpenRouterProvider {
         let api_base = self.api_base.clone();
         let auth = self.auth.clone();
         let send_openrouter_headers = self.send_openrouter_headers;
+        let extra_headers = self.extra_headers.clone();
         let request_for_retries = request;
         let model_for_stream = model.clone();
         let provider_pin = Arc::clone(&self.provider_pin);
@@ -319,6 +320,7 @@ impl Provider for OpenRouterProvider {
                 api_base,
                 auth,
                 send_openrouter_headers,
+                extra_headers,
                 request_for_retries,
                 tx,
                 provider_pin,
@@ -783,6 +785,7 @@ impl Provider for OpenRouterProvider {
             reasoning_effort_support: self.reasoning_effort_support,
             max_tokens: self.max_tokens,
             extra_body: self.extra_body.clone(),
+            extra_headers: self.extra_headers.clone(),
             static_models: self.static_models.clone(),
             static_context_limits: self.static_context_limits.clone(),
             static_image_input_support: self.static_image_input_support.clone(),
