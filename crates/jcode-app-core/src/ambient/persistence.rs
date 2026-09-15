@@ -14,7 +14,18 @@ impl AmbientState {
     pub fn load() -> Result<Self> {
         let path = state_path()?;
         if path.exists() {
-            storage::read_json(&path)
+            let mut state: Self = storage::read_json(&path)?;
+            // A persisted `Running` state cannot be trusted: the cycle that
+            // wrote it may have died without reaching the completion handler
+            // (crash, OOM, kill). Since `should_run` returns false for
+            // `Running`, restoring it verbatim wedges ambient mode permanently.
+            // A live runner re-asserts its own `Running` state in memory, so
+            // demoting a recovered `Running` to `Idle` is always safe.
+            if matches!(state.status, AmbientStatus::Running { .. }) {
+                state.status = AmbientStatus::Idle;
+                let _ = state.save();
+            }
+            Ok(state)
         } else {
             Ok(Self::default())
         }

@@ -56,6 +56,17 @@ struct AmbientRunnerInner {
     active_cycle_queue: RwLock<Option<SoftInterruptQueue>>,
 }
 
+/// Whether the ambient loop is allowed to run a cycle right now.
+///
+/// Reads live config rather than a value captured at loop start, so enabling
+/// ambient in `config.toml` takes effect on the next iteration instead of
+/// requiring a restart. Extracted for testability: `run_loop` cannot easily be
+/// asserted against, and a regression test for the boot-time snapshot needs a
+/// seam that fails when the read is hoisted out of the loop.
+pub(crate) fn ambient_allowed_now(status: AmbientStatus) -> bool {
+    config().ambient.enabled && !matches!(status, AmbientStatus::Disabled)
+}
+
 impl AmbientRunnerHandle {
     pub fn new(safety: Arc<SafetySystem>) -> Self {
         let state = AmbientState::load().unwrap_or_default();
@@ -588,8 +599,12 @@ impl AmbientRunnerHandle {
             // Check state
             let state = { self.inner.state.read().await.clone() };
 
-            let ambient_allowed =
-                ambient_enabled && !matches!(state.status, AmbientStatus::Disabled);
+            // Re-read on every iteration rather than snapshotting once at start:
+            // a boot-time value would keep the loop gated off after the user
+            // enables ambient in config.toml, while `ambient:status` (which reads
+            // live config) reports `enabled: true`. The reply pollers below still
+            // key off the startup value, since they are one-shot spawns.
+            let ambient_allowed = ambient_allowed_now(state.status.clone());
 
             if ambient_allowed {
                 // Update scheduler's user-active state

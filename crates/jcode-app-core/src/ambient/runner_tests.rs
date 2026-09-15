@@ -222,3 +222,107 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
                 .contains("Spawned session handled task.")
     }));
 }
+
+/// A persisted `Running` status must not survive a reload.
+///
+/// A cycle that dies before its completion handler (crash, OOM, kill, hung
+/// provider call) leaves `state.json` at `Running`. Since `should_run()`
+/// returns false for `Running`, restoring it verbatim wedges ambient
+/// permanently. Regression for the stale-Running recovery in
+/// `AmbientState::load`.
+#[test]
+fn persisted_running_state_is_demoted_to_idle_on_load() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let ambient_dir = temp.path().join("ambient");
+    std::fs::create_dir_all(&ambient_dir).expect("ambient dir");
+    let wedged = r#"{"status":{"Running":{"detail":"running agent"}}"#.to_string()
+        + r#","last_run":null,"last_summary":null,"last_compactions":null,"#;
+    std::fs::write(
+        ambient_dir.join("state.json"),
+        format!(
+            "{}\"last_memories_modified\":null,\"total_cycles\":0}}",
+            wedged
+        ),
+    )
+    .expect("write wedged state");
+
+    // Sanity: the fixture really is a Running state.
+    let raw: crate::ambient::AmbientState =
+        crate::storage::read_json(&ambient_dir.join("state.json")).expect("read fixture");
+    assert!(
+        matches!(raw.status, crate::ambient::AmbientStatus::Running { .. }),
+        "fixture precondition: persisted state must be Running"
+    );
+
+    // The load path used by AmbientManager::new() must recover it.
+    let loaded = crate::ambient::AmbientState::load().expect("load state");
+    assert_eq!(
+        loaded.status,
+        crate::ambient::AmbientStatus::Idle,
+        "a recovered Running status must be demoted to Idle, otherwise \
+         should_run() can never return true again"
+    );
+    assert_eq!(loaded.total_cycles, 0);
+}
+
+/// Enabling ambient in config while a daemon is already running must be
+/// picked up without a restart.
+///
+/// Regression for the boot-time `ambient_enabled` snapshot in `run_loop`. With
+/// the snapshot, the status endpoint reported `enabled: true` (it reads live
+/// config) while the loop stayed gated off forever.
+///
+/// Asserts on the loop's gate decision itself. An earlier version of this test
+/// asserted that `state.status != Disabled` behind an `if reported_enabled`
+/// guard; it passed on pristine upstream with the bug present, because it never
+/// enabled ambient and never touched the gate. This one reads the same helper
+/// `run_loop` calls and therefore fails when the read is hoisted out of the
+/// loop.
+#[test]
+fn ambient_gate_observes_config_edited_after_loop_start() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let path = crate::config::Config::path().expect("config path");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+
+    // Daemon boots with ambient disabled.
+    std::fs::write(&path, "[ambient]\nenabled = false\n").expect("write");
+    crate::config::Config::invalidate_cache();
+    assert!(
+        !crate::config::config().ambient.enabled,
+        "precondition: ambient must start disabled"
+    );
+
+    // What `run_loop` used to capture once, before the loop (runner.rs:551).
+    let boot_snapshot = crate::config::config().ambient.enabled;
+    assert!(
+        !crate::ambient::runner::ambient_allowed_now(crate::ambient::AmbientStatus::Idle),
+        "precondition: gate must be closed while config says disabled"
+    );
+
+    // User enables ambient while the daemon keeps running. A different length
+    // plus an extra line so the metadata fingerprint notices the edit even on
+    // filesystems with coarse timestamp resolution.
+    std::fs::write(&path, "[ambient]\nenabled = true\n# edited\n").expect("edit");
+    crate::config::Config::invalidate_cache();
+
+    // The status endpoint (runner.rs:252) reads live config and reports enabled.
+    assert!(
+        crate::config::config().ambient.enabled,
+        "status endpoint would report enabled=true here"
+    );
+
+    // The loop's gate must agree. This is the actual regression assertion: it
+    // fails if the gate still uses `boot_snapshot`.
+    assert!(
+        crate::ambient::runner::ambient_allowed_now(crate::ambient::AmbientStatus::Idle),
+        "gate must observe the live config edit, not the boot-time snapshot \
+         ({boot_snapshot}); otherwise ambient:status reports enabled=true while \
+         the loop never runs a cycle"
+    );
+}
